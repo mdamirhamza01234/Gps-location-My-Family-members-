@@ -1,4 +1,4 @@
-name: family_locator
+name: gps_tracker
 description: Family location sharing - raw GPS to Firebase, opens official Google Maps app (no Maps SDK, no API key).
 publish_to: "none"
 version: 1.0.0+1

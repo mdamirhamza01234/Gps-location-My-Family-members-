@@ -8,10 +8,9 @@ build/
 .idea/
 .vscode/
 
-# Firebase secrets/config (apne hi repo me rakhna ho to hata dena)
-android/app/google-services.json
-ios/Runner/GoogleService-Info.plist
-lib/firebase_options.dart
+# Generated at build time (see .github/workflows/build-apk.yml)
+android/
+ios/
 
 # Android signing
 android/key.properties

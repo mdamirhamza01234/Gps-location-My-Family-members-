@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "473060406584",
+    "project_id": "gps-location-my-family",
+    "storage_bucket": "gps-location-my-family.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:473060406584:android:431079d9e41c67075cbdcd",
+        "android_client_info": {
+          "package_name": "com.myfamily.gps_tracker"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCVAJe1LRAF77fWIxwYDZBNw-4H2fTMDA0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
