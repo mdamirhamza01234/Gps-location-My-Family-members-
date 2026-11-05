@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:ui' show DartPluginRegistrant;
 
@@ -331,18 +332,55 @@ class FindScreen extends StatefulWidget {
 
 class _FindScreenState extends State<FindScreen> {
   final _phoneCtrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
   bool _loading = false;
   String? _error;
   String? _info;
   bool _sharing = true;
+  List<Map<String, dynamic>> _history = [];
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((p) {
-      _phoneCtrl.text = p.getString('last_search') ?? '';
-      setState(() => _sharing = p.getBool('sharing_on') ?? false);
+      var h = <Map<String, dynamic>>[];
+      try {
+        h = (jsonDecode(p.getString('history') ?? '[]') as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      } catch (_) {}
+      setState(() {
+        _sharing = p.getBool('sharing_on') ?? false;
+        _history = h;
+      });
     });
+  }
+
+  /// Recent fetch history: sabse naya upar, max 20, number ke hisaab se ek hi entry.
+  Future<void> _addHistory(String phone, String name) async {
+    final p = await SharedPreferences.getInstance();
+    var keepName = name;
+    for (final e in _history) {
+      if (e['phone'] == phone && keepName.isEmpty) {
+        keepName = (e['name'] as String?) ?? '';
+      }
+    }
+    final list = _history.where((e) => e['phone'] != phone).toList();
+    list.insert(0, {
+      'phone': phone,
+      'name': keepName,
+      't': DateTime.now().millisecondsSinceEpoch,
+    });
+    if (list.length > 20) list.removeRange(20, list.length);
+    await p.setString('history', jsonEncode(list));
+    if (mounted) setState(() => _history = list);
+  }
+
+  Future<void> _deleteHistory(String phone) async {
+    final p = await SharedPreferences.getInstance();
+    final list = _history.where((e) => e['phone'] != phone).toList();
+    await p.setString('history', jsonEncode(list));
+    setState(() => _history = list);
   }
 
   Future<void> _open() async {
@@ -383,8 +421,7 @@ class _FindScreenState extends State<FindScreen> {
       }
       setState(() => _info = lines.isEmpty ? null : lines.join('\n'));
 
-      final p = await SharedPreferences.getInstance();
-      await p.setString('last_search', phone);
+      await _addHistory(phone, _nameCtrl.text.trim());
       final opened = await _openGoogleMaps(lat, lng);
       if (!opened) setState(() => _error = 'Google Maps nahi khul paya.');
     } catch (e) {
@@ -445,6 +482,7 @@ class _FindScreenState extends State<FindScreen> {
   @override
   void dispose() {
     _phoneCtrl.dispose();
+    _nameCtrl.dispose();
     super.dispose();
   }
 
@@ -461,50 +499,83 @@ class _FindScreenState extends State<FindScreen> {
           onChanged: _toggleSharing,
         ),
       ),
-      body: Padding(
+      body: ListView(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              controller: _phoneCtrl,
-              keyboardType: TextInputType.phone,
-              style: const TextStyle(fontSize: 20),
-              decoration: const InputDecoration(
-                labelText: 'Mobile number',
-                prefixIcon: Icon(Icons.phone),
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (_) => _open(),
+        children: [
+          TextField(
+            controller: _nameCtrl,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Naam (optional)',
+              prefixIcon: Icon(Icons.person),
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 20),
-            SizedBox(
-              height: 56,
-              child: FilledButton.icon(
-                onPressed: _loading ? null : _open,
-                icon: _loading
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.map),
-                label: const Text('Location fetch karo',
-                    style: TextStyle(fontSize: 18)),
-              ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _phoneCtrl,
+            keyboardType: TextInputType.phone,
+            style: const TextStyle(fontSize: 20),
+            decoration: const InputDecoration(
+              labelText: 'Mobile number *',
+              prefixIcon: Icon(Icons.phone),
+              border: OutlineInputBorder(),
             ),
-            if (_info != null) ...[
-              const SizedBox(height: 16),
-              Text(_info!, textAlign: TextAlign.center),
-            ],
-            if (_error != null) ...[
-              const SizedBox(height: 16),
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.red)),
-            ],
+            onSubmitted: (_) => _open(),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            height: 56,
+            child: FilledButton.icon(
+              onPressed: _loading ? null : _open,
+              icon: _loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.map),
+              label: const Text('Location fetch karo',
+                  style: TextStyle(fontSize: 18)),
+            ),
+          ),
+          if (_info != null) ...[
+            const SizedBox(height: 16),
+            Text(_info!, textAlign: TextAlign.center),
           ],
-        ),
+          if (_error != null) ...[
+            const SizedBox(height: 16),
+            Text(_error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.red)),
+          ],
+          if (_history.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            Text('Recent fetch',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            for (final e in _history)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const CircleAvatar(child: Icon(Icons.history)),
+                title: Text((e['name'] as String).isNotEmpty
+                    ? e['name'] as String
+                    : e['phone'] as String),
+                subtitle: Text(
+                    '${(e['name'] as String).isNotEmpty ? '${e['phone']} \u2022 ' : ''}'
+                    '${ago(DateTime.fromMillisecondsSinceEpoch(e['t'] as int))}'),
+                trailing: IconButton(
+                  tooltip: 'History se hatao',
+                  icon: const Icon(Icons.close),
+                  onPressed: () => _deleteHistory(e['phone'] as String),
+                ),
+                onTap: () {
+                  _nameCtrl.text = e['name'] as String;
+                  _phoneCtrl.text = e['phone'] as String;
+                  _open();
+                },
+              ),
+          ],
+        ],
       ),
     );
   }
