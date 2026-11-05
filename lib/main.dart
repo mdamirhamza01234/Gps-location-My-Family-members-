@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'dart:ui' show DartPluginRegistrant;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart' hide ServiceStatus;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:telephony_sms/telephony_sms.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
@@ -39,6 +41,27 @@ String ago(DateTime t) {
   return '${d.inDays} din pehle';
 }
 
+String mapsLink(double lat, double lng) =>
+    'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+
+/// Internet band hone par SMS bhejne wale family numbers.
+Future<List<String>> loadSmsContacts() async {
+  final p = await SharedPreferences.getInstance();
+  await p.reload();
+  try {
+    return (jsonDecode(p.getString('sms_contacts') ?? '[]') as List)
+        .map((e) => e.toString())
+        .toList();
+  } catch (_) {
+    return [];
+  }
+}
+
+Future<void> saveSmsContacts(List<String> numbers) async {
+  final p = await SharedPreferences.getInstance();
+  await p.setString('sms_contacts', jsonEncode(numbers));
+}
+
 // ------------------------------------------------- BACKGROUND LOCATION SVC ----
 
 /// Ye function app band hone (swipe) ke baad bhi alag background service me
@@ -63,6 +86,33 @@ Future<void> onStart(ServiceInstance service) async {
 
   StreamSubscription<Position>? posSub;
   StreamSubscription<ServiceStatus>? svcSub;
+  StreamSubscription<List<ConnectivityResult>>? connSub;
+  bool offlineSmsSent = false;
+
+  /// Internet band hote hi, sirf ek baar, aakhri GPS fix SMS se bhej do.
+  Future<void> sendOfflineSms() async {
+    if (offlineSmsSent) return;
+    offlineSmsSent = true;
+    try {
+      final contacts = await loadSmsContacts();
+      if (contacts.isEmpty) return;
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings:
+            const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 20));
+      final link = mapsLink(pos.latitude, pos.longitude);
+      final sms = TelephonySMS();
+      if (!await sms.requestPermission()) return;
+      for (final num in contacts) {
+        try {
+          await sms.sendSMS(
+              phone: num,
+              message:
+                  'Family Locator: internet band hai, ye meri GPS location hai: $link');
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
 
   void notify(String text) {
     if (service is AndroidServiceInstance) {
@@ -118,9 +168,26 @@ Future<void> onStart(ServiceInstance service) async {
       .listen((s) => onLocationState(s == ServiceStatus.enabled));
   await onLocationState(await Geolocator.isLocationServiceEnabled());
 
+  // Internet band hote hi turant SMS; wapas aane par Firebase apne aap
+  // resume ho jaata hai (upar wala position listener).
+  connSub = Connectivity().onConnectivityChanged.listen((results) {
+    final isOffline =
+        results.isEmpty || results.every((r) => r == ConnectivityResult.none);
+    if (isOffline) {
+      sendOfflineSms();
+    } else {
+      offlineSmsSent = false;
+    }
+  });
+  final initial = await Connectivity().checkConnectivity();
+  if (initial.isEmpty || initial.every((r) => r == ConnectivityResult.none)) {
+    await sendOfflineSms();
+  }
+
   service.on('stop').listen((_) async {
     await posSub?.cancel();
     await svcSub?.cancel();
+    await connSub?.cancel();
     await setStatus('off');
     service.stopSelf();
   });
@@ -238,6 +305,9 @@ class _SetupScreenState extends State<SetupScreen> {
       await Permission.notification.request();
       await _askAlways();
       await Permission.ignoreBatteryOptimizations.request();
+      try {
+        await TelephonySMS().requestPermission();
+      } catch (_) {}
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('my_phone', phone);
@@ -447,6 +517,56 @@ class _FindScreenState extends State<FindScreen> {
     return false;
   }
 
+  Future<void> _editSmsContacts() async {
+    final contacts = await loadSmsContacts();
+    final ctrl = TextEditingController(text: contacts.join('\n'));
+    if (!mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('SMS fallback numbers'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+                'Jab is phone ka internet band ho jaaye, in numbers par '
+                'turant SMS se location bheji jayegi. Ek line me ek number.',
+                style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              maxLines: 5,
+              keyboardType: TextInputType.multiline,
+              decoration: const InputDecoration(
+                  hintText: '9876543210\n9123456780',
+                  border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final numbers = ctrl.text
+        .split('\n')
+        .map(normalizePhone)
+        .where((n) => n.length == 10)
+        .toSet()
+        .toList();
+    await saveSmsContacts(numbers);
+    try {
+      await TelephonySMS().requestPermission();
+    } catch (_) {}
+  }
+
   Future<void> _toggleSharing(bool on) async {
     final p = await SharedPreferences.getInstance();
     final svc = FlutterBackgroundService();
@@ -489,7 +609,16 @@ class _FindScreenState extends State<FindScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Family Locator')),
+      appBar: AppBar(
+        title: const Text('Family Locator'),
+        actions: [
+          IconButton(
+            tooltip: 'SMS fallback numbers',
+            icon: const Icon(Icons.sms_outlined),
+            onPressed: _editSmsContacts,
+          ),
+        ],
+      ),
       bottomNavigationBar: SafeArea(
         child: SwitchListTile(
           secondary: const Icon(Icons.share_location),

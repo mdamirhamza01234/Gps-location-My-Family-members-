@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Patch the freshly generated Flutter android/ folder:
 - Google services Gradle plugin
-- minSdk 23
-- location / background / notification permissions, geo: + https: queries
+- minSdk 24 (telephony_sms needs API 24+)
+- location / background / notification / SMS permissions, geo: + https: queries
 - background location service (foregroundServiceType=location) + notification icon
 Every step is idempotent.
 """
@@ -41,8 +41,9 @@ for name in ("build.gradle.kts", "build.gradle"):
                 pat = r'(\s*id\s*"com\.android\.application"[^\n]*\n)'
             s, n = re.subn(pat, lambda m: m.group(1) + add, s, count=1)
             assert n == 1, f"could not patch {name}"
+        # telephony_sms needs API 24+
         s = re.sub(r'minSdk(?:Version)?\s*=?\s*flutter\.minSdkVersion',
-                   'minSdk = 23', s)
+                   'minSdk = 24', s)
         f.write_text(s)
 
 # 3) AndroidManifest.xml
@@ -60,11 +61,15 @@ perms = [
     "WAKE_LOCK",
     "RECEIVE_BOOT_COMPLETED",
     "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    "SEND_SMS",
+    "ACCESS_NETWORK_STATE",
 ]
 block = ""
 for p in perms:
     if f"android.permission.{p}" not in s:
         block += f'    <uses-permission android:name="android.permission.{p}"/>\n'
+if 'android.hardware.telephony' not in s:
+    block += '    <uses-feature android:name="android.hardware.telephony" android:required="false"/>\n'
 if "<queries>" not in s:
     block += """    <queries>
         <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="geo"/></intent>
