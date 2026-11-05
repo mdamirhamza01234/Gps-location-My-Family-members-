@@ -90,6 +90,31 @@ if "flutter_background_service.BackgroundService" not in s:
     assert n == 1, "could not add service to manifest"
 m.write_text(s)
 
+# 3b) root android/build.gradle.kts: some plugins (another_telephony) still ship
+# Kotlin jvmTarget 1.8 while the app compiles Java 11 -> force both to 11.
+root_build = root / "build.gradle.kts"
+if root_build.exists():
+    s = root_build.read_text()
+    marker = "// jvmTarget alignment for plugins"
+    if marker not in s:
+        s += f"""
+{marker}
+subprojects {{
+    afterEvaluate {{
+        extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.let {{
+            it.compileOptions {{
+                sourceCompatibility = JavaVersion.VERSION_11
+                targetCompatibility = JavaVersion.VERSION_11
+            }}
+        }}
+        tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile::class.java).configureEach {{
+            kotlinOptions {{ jvmTarget = "11" }}
+        }}
+    }}
+}}
+"""
+        root_build.write_text(s)
+
 # 4) Notification icon required by flutter_background_service
 d = root / "app/src/main/res/drawable"
 d.mkdir(parents=True, exist_ok=True)
