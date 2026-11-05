@@ -55,7 +55,7 @@ Future<void> onStart(ServiceInstance service) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
   final phone = prefs.getString('my_phone');
-  if (phone == null) {
+  if (phone == null || !(prefs.getBool('sharing_on') ?? false)) {
     service.stopSelf();
     return;
   }
@@ -120,6 +120,7 @@ Future<void> onStart(ServiceInstance service) async {
   service.on('stop').listen((_) async {
     await posSub?.cancel();
     await svcSub?.cancel();
+    await setStatus('off');
     service.stopSelf();
   });
 }
@@ -154,7 +155,7 @@ Future<void> main() async {
 
   final prefs = await SharedPreferences.getInstance();
   final phone = prefs.getString('my_phone');
-  if (phone != null) {
+  if (phone != null && (prefs.getBool('sharing_on') ?? false)) {
     try {
       final svc = FlutterBackgroundService();
       if (!await svc.isRunning()) await svc.startService();
@@ -239,6 +240,7 @@ class _SetupScreenState extends State<SetupScreen> {
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('my_phone', phone);
+      await prefs.setBool('sharing_on', true);
 
       final svc = FlutterBackgroundService();
       if (await svc.isRunning()) {
@@ -332,12 +334,14 @@ class _FindScreenState extends State<FindScreen> {
   bool _loading = false;
   String? _error;
   String? _info;
+  bool _sharing = true;
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((p) {
       _phoneCtrl.text = p.getString('last_search') ?? '';
+      setState(() => _sharing = p.getBool('sharing_on') ?? false);
     });
   }
 
@@ -406,30 +410,36 @@ class _FindScreenState extends State<FindScreen> {
     return false;
   }
 
-  Future<void> _stopSharing() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('Sharing band karein?'),
-        content: const Text(
-            'Aapki location family ko dikhna band ho jayegi.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: const Text('Nahi')),
-          TextButton(
-              onPressed: () => Navigator.pop(c, true),
-              child: const Text('Haan, band karo')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    FlutterBackgroundService().invoke('stop');
+  Future<void> _toggleSharing(bool on) async {
     final p = await SharedPreferences.getInstance();
-    await p.remove('my_phone');
-    if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const SetupScreen()), (_) => false);
+    final svc = FlutterBackgroundService();
+    if (!on) {
+      svc.invoke('stop');
+      await p.setBool('sharing_on', false);
+      setState(() => _sharing = false);
+      return;
+    }
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      setState(() => _error = 'Phone ka Location (GPS) ON karo, phir switch ON karo.');
+      return;
+    }
+    final loc = await Permission.locationWhenInUse.request();
+    if (!loc.isGranted) {
+      setState(() => _error = 'Location permission zaroori hai.');
+      if (loc.isPermanentlyDenied) await openAppSettings();
+      return;
+    }
+    await Permission.notification.request();
+    await p.setBool('sharing_on', true);
+    if (await svc.isRunning()) {
+      svc.invoke('stop');
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    await svc.startService();
+    setState(() {
+      _sharing = true;
+      _error = null;
+    });
   }
 
   @override
@@ -441,16 +451,15 @@ class _FindScreenState extends State<FindScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Family Locator'),
-        actions: [
-          PopupMenuButton<String>(
-            onSelected: (_) => _stopSharing(),
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'stop', child: Text('Meri sharing band karo')),
-            ],
-          ),
-        ],
+      appBar: AppBar(title: const Text('Family Locator')),
+      bottomNavigationBar: SafeArea(
+        child: SwitchListTile(
+          secondary: const Icon(Icons.share_location),
+          title: const Text('Meri location share'),
+          subtitle: Text(_sharing ? 'ON: family dekh sakti hai' : 'OFF'),
+          value: _sharing,
+          onChanged: _toggleSharing,
+        ),
       ),
       body: Padding(
         padding: const EdgeInsets.all(24),
