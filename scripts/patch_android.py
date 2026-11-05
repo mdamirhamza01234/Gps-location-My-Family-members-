@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Patch the freshly generated Flutter android/ folder:
 - Google services Gradle plugin
-- minSdk 24 (telephony_sms needs API 24+)
+- minSdk 23
 - location / background / notification / SMS permissions, geo: + https: queries
 - background location service (foregroundServiceType=location) + notification icon
 Every step is idempotent.
@@ -41,9 +41,8 @@ for name in ("build.gradle.kts", "build.gradle"):
                 pat = r'(\s*id\s*"com\.android\.application"[^\n]*\n)'
             s, n = re.subn(pat, lambda m: m.group(1) + add, s, count=1)
             assert n == 1, f"could not patch {name}"
-        # telephony_sms needs API 24+
         s = re.sub(r'minSdk(?:Version)?\s*=?\s*flutter\.minSdkVersion',
-                   'minSdk = 24', s)
+                   'minSdk = 23', s)
         f.write_text(s)
 
 # 3) AndroidManifest.xml

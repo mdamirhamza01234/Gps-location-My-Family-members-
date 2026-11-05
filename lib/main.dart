@@ -11,8 +11,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart' hide ServiceStatus;
+import 'package:another_telephony/telephony.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:telephony_sms/telephony_sms.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
@@ -101,12 +101,13 @@ Future<void> onStart(ServiceInstance service) async {
             const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 20));
       final link = mapsLink(pos.latitude, pos.longitude);
-      final sms = TelephonySMS();
-      if (!await sms.requestPermission()) return;
+      final telephony = Telephony.backgroundInstance;
+      final granted = await telephony.requestSmsPermissions ?? false;
+      if (!granted) return;
       for (final num in contacts) {
         try {
-          await sms.sendSMS(
-              phone: num,
+          await telephony.sendSms(
+              to: num,
               message:
                   'Family Locator: internet band hai, ye meri GPS location hai: $link');
         } catch (_) {}
@@ -306,7 +307,7 @@ class _SetupScreenState extends State<SetupScreen> {
       await _askAlways();
       await Permission.ignoreBatteryOptimizations.request();
       try {
-        await TelephonySMS().requestPermission();
+        await Telephony.instance.requestSmsPermissions;
       } catch (_) {}
 
       final prefs = await SharedPreferences.getInstance();
@@ -563,7 +564,7 @@ class _FindScreenState extends State<FindScreen> {
         .toList();
     await saveSmsContacts(numbers);
     try {
-      await TelephonySMS().requestPermission();
+      await Telephony.instance.requestSmsPermissions;
     } catch (_) {}
   }
 
