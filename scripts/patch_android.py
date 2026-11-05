@@ -100,8 +100,12 @@ if root_build.exists():
         s += f"""
 {marker}
 subprojects {{
+    tasks.withType(JavaCompile::class.java).configureEach {{
+        sourceCompatibility = "17"
+        targetCompatibility = "17"
+    }}
     tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile::class.java).configureEach {{
-        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }}
 }}
 """
