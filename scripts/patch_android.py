@@ -2,7 +2,9 @@
 """Patch the freshly generated Flutter android/ folder:
 - Google services Gradle plugin
 - minSdk 23
-- location / internet permissions + queries for geo: and https:
+- location / background / notification permissions, geo: + https: queries
+- background location service (foregroundServiceType=location) + notification icon
+Every step is idempotent.
 """
 import re
 from pathlib import Path
@@ -46,20 +48,57 @@ for name in ("build.gradle.kts", "build.gradle"):
 # 3) AndroidManifest.xml
 m = root / "app/src/main/AndroidManifest.xml"
 s = m.read_text()
-if "ACCESS_FINE_LOCATION" not in s:
-    block = """    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <queries>
+
+perms = [
+    "INTERNET",
+    "ACCESS_FINE_LOCATION",
+    "ACCESS_COARSE_LOCATION",
+    "ACCESS_BACKGROUND_LOCATION",
+    "FOREGROUND_SERVICE",
+    "FOREGROUND_SERVICE_LOCATION",
+    "POST_NOTIFICATIONS",
+    "WAKE_LOCK",
+    "RECEIVE_BOOT_COMPLETED",
+    "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+]
+block = ""
+for p in perms:
+    if f"android.permission.{p}" not in s:
+        block += f'    <uses-permission android:name="android.permission.{p}"/>\n'
+if "<queries>" not in s:
+    block += """    <queries>
         <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="geo"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
     </queries>
 """
+if block:
     s, n = re.subn(r'(\s*)<application', lambda mm: "\n" + block + mm.group(1) + "<application", s, count=1)
-    assert n == 1, "could not patch manifest"
-    m.write_text(s)
+    assert n == 1, "could not add permissions to manifest"
+
+if "flutter_background_service.BackgroundService" not in s:
+    svc = """
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:foregroundServiceType="location"
+            android:exported="true"/>
+"""
+    s, n = re.subn(r'(<application[^>]*>)', lambda mm: mm.group(1) + svc, s, count=1)
+    assert n == 1, "could not add service to manifest"
+m.write_text(s)
+
+# 4) Notification icon required by flutter_background_service
+d = root / "app/src/main/res/drawable"
+d.mkdir(parents=True, exist_ok=True)
+(d / "ic_bg_service_small.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2C8.13,2 5,5.13 5,9c0,5.25 7,13 7,13s7,-7.75 7,-13c0,-3.87 -3.13,-7 -7,-7zM12,11.5c-1.38,0 -2.5,-1.12 -2.5,-2.5s1.12,-2.5 2.5,-2.5 2.5,1.12 2.5,2.5 -1.12,2.5 -2.5,2.5z"/>
+</vector>
+""")
 
 print("android/ patched OK")
