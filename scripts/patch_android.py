@@ -97,15 +97,19 @@ if root_build.exists():
     s = root_build.read_text()
     marker = "// jvmTarget alignment for plugins"
     if marker not in s:
+        # Only the another_telephony plugin ships Kotlin jvmTarget 1.8 while its
+        # own Java task compiles at 11 -> match Kotlin to that module's own
+        # Java target. Scoped to this one module so every other module (which
+        # already matches on its own, e.g. at 17) is left untouched.
         s += f"""
 {marker}
-subprojects {{
+project(":another_telephony") {{
     tasks.withType(JavaCompile::class.java).configureEach {{
-        sourceCompatibility = "17"
-        targetCompatibility = "17"
+        sourceCompatibility = "11"
+        targetCompatibility = "11"
     }}
     tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile::class.java).configureEach {{
-        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }}
 }}
 """
