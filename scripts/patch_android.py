@@ -101,14 +101,8 @@ if root_build.exists():
 {marker}
 subprojects {{
     afterEvaluate {{
-        extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.let {{
-            it.compileOptions {{
-                sourceCompatibility = JavaVersion.VERSION_11
-                targetCompatibility = JavaVersion.VERSION_11
-            }}
-        }}
         tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile::class.java).configureEach {{
-            kotlinOptions {{ jvmTarget = "11" }}
+            compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
         }}
     }}
 }}
