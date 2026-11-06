@@ -129,22 +129,45 @@ Future<Map<String, dynamic>?> resolveMemberData(String phone) async {
   return null;
 }
 
-/// Internet band hone par SMS bhejne wale family numbers.
-Future<List<String>> loadSmsContacts() async {
+// --------------------------------------- SMS FALLBACK (auto, no typing) ----
+//
+// SMS fallback numbers manually nahi daale jaate — jo numbers kisi ne bhi
+// kabhi is family code me register kiye hain (families/{code}/numbers),
+// wahi apne aap SMS recipients hain (apna number chhod kar). Purana number
+// edit hone par bhi registry se kabhi hataya nahi jaata, isliye SMS bhi
+// usi purane number par jaata rehta hai — fetch wale system jaisa hi.
+//
+// Ye list internet rahte waqt local cache me save hoti hai, taaki internet
+// band hone ke turant baad (jab Firestore padhna mumkin na ho) bhi pata ho
+// ki SMS kisko bhejna hai.
+
+/// Family registry se sab numbers padho (apna chhod kar) aur cache update karo.
+Future<List<String>> refreshSmsContactsCache() async {
+  final mine = await loadMyNumbers();
+  final snap = await FirebaseFirestore.instance
+      .collection('families')
+      .doc(kFamilyCode)
+      .collection('numbers')
+      .get()
+      .timeout(const Duration(seconds: 15));
+  final others =
+      snap.docs.map((d) => d.id).where((n) => !mine.contains(n)).toList();
+  final p = await SharedPreferences.getInstance();
+  await p.setString('sms_contacts_cache', jsonEncode(others));
+  return others;
+}
+
+/// Offline hote waqt isi cache se SMS recipients liye jaate hain.
+Future<List<String>> loadSmsContactsCache() async {
   final p = await SharedPreferences.getInstance();
   await p.reload();
   try {
-    return (jsonDecode(p.getString('sms_contacts') ?? '[]') as List)
+    return (jsonDecode(p.getString('sms_contacts_cache') ?? '[]') as List)
         .map((e) => e.toString())
         .toList();
   } catch (_) {
     return [];
   }
-}
-
-Future<void> saveSmsContacts(List<String> numbers) async {
-  final p = await SharedPreferences.getInstance();
-  await p.setString('sms_contacts', jsonEncode(numbers));
 }
 
 // ------------------------------------------------- BACKGROUND LOCATION SVC ----
@@ -183,7 +206,7 @@ Future<void> onStart(ServiceInstance service) async {
     if (offlineSmsSent) return;
     offlineSmsSent = true;
     try {
-      final contacts = await loadSmsContacts();
+      final contacts = await loadSmsContactsCache();
       if (contacts.isEmpty) return;
       final pos = await Geolocator.getCurrentPosition(
         locationSettings:
@@ -258,7 +281,8 @@ Future<void> onStart(ServiceInstance service) async {
   await onLocationState(await Geolocator.isLocationServiceEnabled());
 
   // Internet band hote hi turant SMS; wapas aane par Firebase apne aap
-  // resume ho jaata hai (upar wala position listener).
+  // resume ho jaata hai (upar wala position listener), aur SMS cache bhi
+  // taaza ho jaati hai taaki agli baar internet jaane par sahi numbers mile.
   connSub = Connectivity().onConnectivityChanged.listen((results) {
     final isOffline =
         results.isEmpty || results.every((r) => r == ConnectivityResult.none);
@@ -266,11 +290,14 @@ Future<void> onStart(ServiceInstance service) async {
       sendOfflineSms();
     } else {
       offlineSmsSent = false;
+      refreshSmsContactsCache();
     }
   });
   final initial = await Connectivity().checkConnectivity();
   if (initial.isEmpty || initial.every((r) => r == ConnectivityResult.none)) {
     await sendOfflineSms();
+  } else {
+    await refreshSmsContactsCache();
   }
 
   service.on('stop').listen((_) async {
@@ -316,6 +343,8 @@ Future<void> main() async {
     for (final n in numbers) {
       await linkNumberToMember(n, memberId);
     }
+    // App khulne par agar internet hai, SMS fallback list bhi taaza kar lo.
+    unawaited(refreshSmsContactsCache());
   }
 
   final prefs = await SharedPreferences.getInstance();
@@ -884,54 +913,58 @@ class _FindScreenState extends State<FindScreen> {
     return false;
   }
 
-  Future<void> _editSmsContacts() async {
-    final contacts = await loadSmsContacts();
-    final ctrl = TextEditingController(text: contacts.join('\n'));
-    if (!mounted) return;
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('SMS fallback numbers'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-                'Jab is phone ka internet band ho jaaye, in numbers par '
-                'turant SMS se location bheji jayegi. Ek line me ek number.',
-                style: TextStyle(fontSize: 13)),
-            const SizedBox(height: 12),
-            TextField(
-              controller: ctrl,
-              maxLines: 5,
-              keyboardType: TextInputType.multiline,
-              decoration: const InputDecoration(
-                  hintText: '9876543210\n9123456780',
-                  border: OutlineInputBorder()),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(c, true),
-              child: const Text('Save')),
-        ],
-      ),
-    );
-    if (saved != true) return;
-    final numbers = ctrl.text
-        .split('\n')
-        .map(normalizePhone)
-        .where((n) => n.length == 10)
-        .toSet()
-        .toList();
-    await saveSmsContacts(numbers);
+  /// SMS fallback numbers manual nahi daale jaate — apne aap family registry
+  /// se aate hain (apna number chhod kar). Ye dialog sirf dikhata hai ki
+  /// abhi kiska number SMS cache me hai, aur "Refresh" se turant update karo.
+  Future<void> _showSmsContacts() async {
     try {
       await Telephony.instance.requestSmsPermissions;
     } catch (_) {}
+    var contacts = await loadSmsContactsCache();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, setDialogState) => AlertDialog(
+          title: const Text('SMS fallback numbers'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                  'Jab is phone ka internet band ho jaaye, family ke in '
+                  'numbers par turant SMS se location bheji jayegi. Ye list '
+                  'apne aap family ke registered numbers se banti hai — '
+                  'kuch type nahi karna.',
+                  style: TextStyle(fontSize: 13)),
+              const SizedBox(height: 12),
+              if (contacts.isEmpty)
+                const Text('Abhi koi number cache me nahi hai.')
+              else
+                for (final n in contacts) Text('• $n'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                try {
+                  final fresh = await refreshSmsContactsCache();
+                  setDialogState(() => contacts = fresh);
+                } catch (_) {
+                  if (c.mounted) {
+                    ScaffoldMessenger.of(c).showSnackBar(const SnackBar(
+                        content: Text('Internet check karo aur dobara try karo.')));
+                  }
+                }
+              },
+              child: const Text('Refresh'),
+            ),
+            FilledButton(
+                onPressed: () => Navigator.pop(c), child: const Text('Theek hai')),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _editMyNumbers() async {
@@ -993,7 +1026,7 @@ class _FindScreenState extends State<FindScreen> {
           IconButton(
             tooltip: 'SMS fallback numbers',
             icon: const Icon(Icons.sms_outlined),
-            onPressed: _editSmsContacts,
+            onPressed: _showSmsContacts,
           ),
         ],
       ),

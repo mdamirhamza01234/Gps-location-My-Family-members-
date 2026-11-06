@@ -9,8 +9,9 @@ Family members ke liye simple location-sharing app (Flutter + Firebase), sirf An
   **Google Maps SDK nahi, Maps API key nahi.**
 - Hamburger menu se apna number kabhi bhi edit/add kar sakte ho. Number badalne
   ke baad bhi purana number fetch karne par kaam karta rahega.
-- Internet band ho to SMS se (app bar ke SMS icon se number set karo) turant
-  aakhri location bhej di jaati hai.
+- Internet band ho to SMS se turant aakhri location bhej di jaati hai, family
+  ke baaki registered numbers par — kuch manually dalna nahi padta, app
+  khud apne family ke numbers jaan jaata hai.
 - Notification hamesha dikhta hai jab tak sharing ON hai (Android ka rule hai,
   taaki jis insaan ki location ja rahi hai use hamesha pata rahe).
 
@@ -34,8 +35,9 @@ Repo page > **Releases** > latest version > `app-release.apk` download karke ins
 2. Dusre ki location dekhni ho: naam (optional) aur unka number daalo, "Location
    fetch karo" dabao.
 3. Apna number badalna ho: hamburger menu (top-left) > "Mera number edit karo".
-4. Internet band hone par SMS fallback chahiye to app bar ke SMS icon se
-   family numbers daal do.
+4. App bar ke SMS icon se dekh sakte ho ki abhi SMS fallback me kaunse
+   numbers hain (apne aap aate hain) — "Refresh" se turant update bhi kar
+   sakte ho.
 
 ## Data model (Firestore)
 
