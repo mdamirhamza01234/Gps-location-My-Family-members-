@@ -325,12 +325,16 @@ Future<void> main() async {
       if (!await svc.isRunning()) await svc.startService();
     } catch (_) {}
   }
-  runApp(FamilyLocatorApp(setupDone: numbers.isNotEmpty));
+
+  final Widget next = numbers.isNotEmpty ? const FindScreen() : const SetupScreen();
+  final seenInstructions = prefs.getBool('seen_instructions') ?? false;
+  final home = seenInstructions ? next : InstructionsScreen(next: next);
+  runApp(FamilyLocatorApp(home: home));
 }
 
 class FamilyLocatorApp extends StatelessWidget {
-  final bool setupDone;
-  const FamilyLocatorApp({super.key, required this.setupDone});
+  final Widget home;
+  const FamilyLocatorApp({super.key, required this.home});
 
   @override
   Widget build(BuildContext context) {
@@ -338,7 +342,105 @@ class FamilyLocatorApp extends StatelessWidget {
       title: kAppName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
-      home: setupDone ? const FindScreen() : const SetupScreen(),
+      home: home,
+    );
+  }
+}
+
+// -------------------------------------------------------- INSTRUCTIONS ----
+
+class InstructionsScreen extends StatefulWidget {
+  final Widget next;
+  const InstructionsScreen({super.key, required this.next});
+
+  @override
+  State<InstructionsScreen> createState() => _InstructionsScreenState();
+}
+
+class _InstructionsScreenState extends State<InstructionsScreen> {
+  bool _agreed = false;
+
+  static const _points = [
+    'Ye app aapke family ke logo ke beech location share karne ke liye hai. '
+        'Koi Google Maps SDK ya API key use nahi hoti.',
+    'Aapki location tabhi share hogi jab aap apna number daal kar '
+        '"Location share shuru karo" dabayenge. Jab tak khud ON nahi karte, '
+        'kisi ko kuch nahi jaata.',
+    'Sharing ON hone par notification bar me hamesha ek chhota message '
+        'dikhega. Ye Android ka rule hai, hata nahi sakte — isse hamesha '
+        'pata rahega ki sharing chal rahi hai.',
+    'Location permission maangi jaaye to "Allow all the time" chunein, '
+        'warna app band hone ke baad location bhejna band ho jayega.',
+    'Phone ki Battery setting me is app ko "Unrestricted" rakhein, warna '
+        'Android isse background me band kar sakta hai.',
+    'Internet band ho jaaye to app SMS se bhi aakhri location bhej sakta '
+        'hai. Iske liye SMS icon se family ke number daalna hoga (optional).',
+    'Dusre family member ki location dekhne ke liye unka number daalo aur '
+        '"Location fetch karo" dabao — Google Maps khul jayega.',
+    'Apna number badalna ho to left-top menu se "Mera number edit karo" me '
+        'jao. Purana number badalne ke baad bhi kaam karta rahega.',
+  ];
+
+  Future<void> _continue() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('seen_instructions', true);
+    if (!mounted) return;
+    Navigator.of(context)
+        .pushReplacement(MaterialPageRoute(builder: (_) => widget.next));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Instructions')),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+              itemCount: _points.length,
+              itemBuilder: (c, i) => Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.check_circle, color: Colors.teal, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                        child: Text(_points[i],
+                            style: const TextStyle(fontSize: 15, height: 1.3))),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: _agreed,
+                    onChanged: (v) => setState(() => _agreed = v ?? false),
+                    title: const Text('Maine ye sab padh liya hai'),
+                  ),
+                  SizedBox(
+                    height: 52,
+                    child: FilledButton(
+                      onPressed: _agreed ? _continue : null,
+                      child: const Text('Continue', style: TextStyle(fontSize: 18)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
