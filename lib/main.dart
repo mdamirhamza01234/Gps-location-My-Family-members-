@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:math';
 import 'dart:ui' show DartPluginRegistrant;
 
+import 'package:another_telephony/telephony.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -11,11 +13,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart' hide ServiceStatus;
-import 'package:another_telephony/telephony.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'firebase_options.dart';
+
+const String kAppName = 'Family GPS Tracker';
 
 /// Sab family members ke liye fixed code (app me hi set hai).
 const String kFamilyCode = 'bhagalpur2026xyz';
@@ -25,13 +28,6 @@ String normalizePhone(String input) {
   final digits = input.replaceAll(RegExp(r'\D'), '');
   return digits.length > 10 ? digits.substring(digits.length - 10) : digits;
 }
-
-DocumentReference<Map<String, dynamic>> memberDoc(String phone) =>
-    FirebaseFirestore.instance
-        .collection('families')
-        .doc(kFamilyCode)
-        .collection('members')
-        .doc(phone);
 
 String ago(DateTime t) {
   final d = DateTime.now().difference(t);
@@ -43,6 +39,95 @@ String ago(DateTime t) {
 
 String mapsLink(double lat, double lng) =>
     'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+
+// -------------------------------------------------------- DATA MODEL ----
+//
+// Har sharing karne wale ka ek sthayi "member id" hota hai (phone me hi
+// save hota hai, kabhi badalta nahi). Location isi member id ke naam se
+// save hoti hai. Har phone number sirf ek chhota "numbers/<phone>" pointer
+// hai jo us member id ki taraf ishara karta hai. Number edit/add karne par
+// purana pointer kabhi mitaya nahi jaata, isliye purane number se fetch
+// karne par bhi wahi (taaza) location milti rehti hai.
+
+DocumentReference<Map<String, dynamic>> _membersCol(String memberId) =>
+    FirebaseFirestore.instance
+        .collection('families')
+        .doc(kFamilyCode)
+        .collection('members')
+        .doc(memberId);
+
+DocumentReference<Map<String, dynamic>> _numberDoc(String phone) =>
+    FirebaseFirestore.instance
+        .collection('families')
+        .doc(kFamilyCode)
+        .collection('numbers')
+        .doc(phone);
+
+Future<String> getOrCreateMemberId() async {
+  final p = await SharedPreferences.getInstance();
+  var id = p.getString('member_id');
+  if (id == null) {
+    final rnd = Random();
+    id = '${DateTime.now().millisecondsSinceEpoch}-${rnd.nextInt(999999)}';
+    await p.setString('member_id', id);
+  }
+  return id;
+}
+
+/// Purana pointer kabhi nahi mitaya jaata — isliye purana number bhi
+/// hamesha ke liye isi member ki taraf ishara karta rahega.
+Future<void> linkNumberToMember(String phone, String memberId) async {
+  try {
+    await _numberDoc(phone)
+        .set({'memberId': memberId}, SetOptions(merge: true));
+  } catch (_) {}
+}
+
+/// 'my_numbers' (naya format) ya 'my_phone' (purana format, apne aap migrate).
+Future<List<String>> loadMyNumbers() async {
+  final p = await SharedPreferences.getInstance();
+  await p.reload();
+  final raw = p.getString('my_numbers');
+  if (raw != null) {
+    try {
+      return (jsonDecode(raw) as List).map((e) => e.toString()).toList();
+    } catch (_) {}
+  }
+  final legacy = p.getString('my_phone');
+  if (legacy != null && legacy.isNotEmpty) {
+    await p.setString('my_numbers', jsonEncode([legacy]));
+    return [legacy];
+  }
+  return [];
+}
+
+Future<void> saveMyNumbers(List<String> numbers) async {
+  final p = await SharedPreferences.getInstance();
+  await p.setString('my_numbers', jsonEncode(numbers));
+}
+
+/// Number se location dhundo: pehle numbers/<phone> se member id nikalo,
+/// phir uska location doc padho. Nahi mila to purane (migrate na hue)
+/// setup ke liye seedha members/<phone> bhi try karo.
+Future<Map<String, dynamic>?> resolveMemberData(String phone) async {
+  try {
+    final link =
+        await _numberDoc(phone).get().timeout(const Duration(seconds: 15));
+    final memberId = link.data()?['memberId'] as String?;
+    if (memberId != null) {
+      final snap = await _membersCol(memberId)
+          .get()
+          .timeout(const Duration(seconds: 15));
+      if (snap.exists) return snap.data();
+    }
+  } catch (_) {}
+  try {
+    final legacy =
+        await _membersCol(phone).get().timeout(const Duration(seconds: 15));
+    if (legacy.exists) return legacy.data();
+  } catch (_) {}
+  return null;
+}
 
 /// Internet band hone par SMS bhejne wale family numbers.
 Future<List<String>> loadSmsContacts() async {
@@ -78,10 +163,14 @@ Future<void> onStart(ServiceInstance service) async {
 
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
-  final phone = prefs.getString('my_phone');
-  if (phone == null || !(prefs.getBool('sharing_on') ?? false)) {
+  final numbers = await loadMyNumbers();
+  if (numbers.isEmpty || !(prefs.getBool('sharing_on') ?? false)) {
     service.stopSelf();
     return;
+  }
+  final memberId = await getOrCreateMemberId();
+  for (final n in numbers) {
+    await linkNumberToMember(n, memberId);
   }
 
   StreamSubscription<Position>? posSub;
@@ -109,7 +198,7 @@ Future<void> onStart(ServiceInstance service) async {
           await telephony.sendSms(
               to: num,
               message:
-                  'Family Locator: internet band hai, ye meri GPS location hai: $link');
+                  '$kAppName: internet band hai, ye meri GPS location hai: $link');
         } catch (_) {}
       }
     } catch (_) {}
@@ -117,14 +206,13 @@ Future<void> onStart(ServiceInstance service) async {
 
   void notify(String text) {
     if (service is AndroidServiceInstance) {
-      service.setForegroundNotificationInfo(
-          title: 'Family Locator', content: text);
+      service.setForegroundNotificationInfo(title: kAppName, content: text);
     }
   }
 
   Future<void> setStatus(String s) async {
     try {
-      await memberDoc(phone).set(
+      await _membersCol(memberId).set(
           {'status': s, 'statusAt': FieldValue.serverTimestamp()},
           SetOptions(merge: true));
     } catch (_) {}
@@ -141,7 +229,7 @@ Future<void> onStart(ServiceInstance service) async {
     ).listen(
       (pos) async {
         try {
-          await memberDoc(phone).set({
+          await _membersCol(memberId).set({
             'lat': pos.latitude,
             'lng': pos.longitude,
             'accuracy': pos.accuracy,
@@ -201,7 +289,7 @@ Future<void> configureService() async {
       autoStart: false,
       autoStartOnBoot: true,
       isForegroundMode: true,
-      initialNotificationTitle: 'Family Locator',
+      initialNotificationTitle: kAppName,
       initialNotificationContent:
           'Aapki location family ke saath share ho rahi hai',
     ),
@@ -222,15 +310,22 @@ Future<void> main() async {
 
   await configureService();
 
+  final numbers = await loadMyNumbers();
+  if (numbers.isNotEmpty) {
+    final memberId = await getOrCreateMemberId();
+    for (final n in numbers) {
+      await linkNumberToMember(n, memberId);
+    }
+  }
+
   final prefs = await SharedPreferences.getInstance();
-  final phone = prefs.getString('my_phone');
-  if (phone != null && (prefs.getBool('sharing_on') ?? false)) {
+  if (numbers.isNotEmpty && (prefs.getBool('sharing_on') ?? false)) {
     try {
       final svc = FlutterBackgroundService();
       if (!await svc.isRunning()) await svc.startService();
     } catch (_) {}
   }
-  runApp(FamilyLocatorApp(setupDone: phone != null));
+  runApp(FamilyLocatorApp(setupDone: numbers.isNotEmpty));
 }
 
 class FamilyLocatorApp extends StatelessWidget {
@@ -240,7 +335,7 @@ class FamilyLocatorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Family Locator',
+      title: kAppName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       home: setupDone ? const FindScreen() : const SetupScreen(),
@@ -248,24 +343,124 @@ class FamilyLocatorApp extends StatelessWidget {
   }
 }
 
-// ----------------------------------------------------------- SETUP SCREEN ----
+// ----------------------------------------------------- NUMBER ENTRY FORM ----
 
-/// Sirf pehli baar: apna number daalo, permission do, sharing hamesha ke liye ON.
-class SetupScreen extends StatefulWidget {
-  const SetupScreen({super.key});
+/// Dono SetupScreen aur "number edit karo" screen isi form ko use karte hain.
+class NumbersForm extends StatefulWidget {
+  final String number1Initial;
+  final String number2Initial;
+  final String buttonLabel;
+  final Future<void> Function(String number1, String number2) onSave;
+  const NumbersForm({
+    super.key,
+    this.number1Initial = '',
+    this.number2Initial = '',
+    required this.buttonLabel,
+    required this.onSave,
+  });
 
   @override
-  State<SetupScreen> createState() => _SetupScreenState();
+  State<NumbersForm> createState() => _NumbersFormState();
 }
 
-class _SetupScreenState extends State<SetupScreen> {
-  final _phoneCtrl = TextEditingController();
+class _NumbersFormState extends State<NumbersForm> {
+  late final _ctrl1 = TextEditingController(text: widget.number1Initial);
+  late final _ctrl2 = TextEditingController(text: widget.number2Initial);
   bool _busy = false;
   String? _error;
 
-  Future<void> _askAlways() async {
+  Future<void> _save() async {
+    final n1 = normalizePhone(_ctrl1.text);
+    final n2 = normalizePhone(_ctrl2.text);
+    if (n1.length != 10) {
+      setState(() => _error = 'Pehla number 10 digit ka hona chahiye.');
+      return;
+    }
+    if (_ctrl2.text.trim().isNotEmpty && n2.length != 10) {
+      setState(() => _error = 'Dusra number 10 digit ka hona chahiye (ya khali chhodo).');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.onSave(n1, n2.length == 10 ? n2 : '');
+    } catch (e) {
+      setState(() => _error = 'Kuch gadbad hui: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl1.dispose();
+    _ctrl2.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _ctrl1,
+          keyboardType: TextInputType.phone,
+          style: const TextStyle(fontSize: 20),
+          decoration: const InputDecoration(
+            labelText: 'Mobile number 1 *',
+            prefixIcon: Icon(Icons.phone),
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _ctrl2,
+          keyboardType: TextInputType.phone,
+          style: const TextStyle(fontSize: 20),
+          decoration: const InputDecoration(
+            labelText: 'Mobile number 2 (optional)',
+            prefixIcon: Icon(Icons.phone_android),
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 20),
+        SizedBox(
+          height: 56,
+          child: FilledButton.icon(
+            onPressed: _busy ? null : _save,
+            icon: _busy
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save),
+            label: Text(widget.buttonLabel, style: const TextStyle(fontSize: 18)),
+          ),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 16),
+          Text(_error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.red)),
+        ],
+      ],
+    );
+  }
+}
+
+// ----------------------------------------------------------- SETUP SCREEN ----
+
+/// Sirf pehli baar: apna number (ya do number) daalo, permission do,
+/// sharing hamesha ke liye ON.
+class SetupScreen extends StatelessWidget {
+  const SetupScreen({super.key});
+
+  Future<void> _askAlways(BuildContext context) async {
     if (await Permission.locationAlways.isGranted) return;
-    if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
@@ -282,106 +477,115 @@ class _SetupScreenState extends State<SetupScreen> {
     await Permission.locationAlways.request();
   }
 
-  Future<void> _start() async {
-    final phone = normalizePhone(_phoneCtrl.text);
-    if (phone.length != 10) {
-      setState(() => _error = '10 digit ka apna mobile number daalo.');
-      return;
+  Future<void> _start(BuildContext context, String n1, String n2) async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      throw 'Phone ka Location (GPS) ON karo, phir dobara dabao.';
     }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
+    final loc = await Permission.locationWhenInUse.request();
+    if (!loc.isGranted) {
+      if (loc.isPermanentlyDenied) await openAppSettings();
+      throw 'Location permission zaroori hai.';
+    }
+    await Permission.notification.request();
+    if (context.mounted) await _askAlways(context);
+    await Permission.ignoreBatteryOptimizations.request();
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) {
-        setState(() => _error = 'Phone ka Location (GPS) ON karo, phir dobara dabao.');
-        return;
-      }
-      final loc = await Permission.locationWhenInUse.request();
-      if (!loc.isGranted) {
-        setState(() => _error = 'Location permission zaroori hai.');
-        if (loc.isPermanentlyDenied) await openAppSettings();
-        return;
-      }
-      await Permission.notification.request();
-      await _askAlways();
-      await Permission.ignoreBatteryOptimizations.request();
-      try {
-        await Telephony.instance.requestSmsPermissions;
-      } catch (_) {}
+      await Telephony.instance.requestSmsPermissions;
+    } catch (_) {}
 
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('my_phone', phone);
-      await prefs.setBool('sharing_on', true);
+    final numbers = [n1, if (n2.isNotEmpty) n2];
+    await saveMyNumbers(numbers);
+    final memberId = await getOrCreateMemberId();
+    for (final n in numbers) {
+      await linkNumberToMember(n, memberId);
+    }
 
-      final svc = FlutterBackgroundService();
-      if (await svc.isRunning()) {
-        svc.invoke('stop');
-        await Future.delayed(const Duration(seconds: 1));
-      }
-      await svc.startService();
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('sharing_on', true);
 
-      if (!mounted) return;
+    final svc = FlutterBackgroundService();
+    if (await svc.isRunning()) {
+      svc.invoke('stop');
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    await svc.startService();
+
+    if (context.mounted) {
       Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const FindScreen()));
-    } catch (e) {
-      setState(() => _error = 'Kuch gadbad hui: $e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
-  }
-
-  @override
-  void dispose() {
-    _phoneCtrl.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Family Locator')),
+      appBar: AppBar(title: const Text(kAppName)),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TextField(
-              controller: _phoneCtrl,
-              keyboardType: TextInputType.phone,
-              style: const TextStyle(fontSize: 20),
-              decoration: const InputDecoration(
-                labelText: 'Apna mobile number',
-                prefixIcon: Icon(Icons.phone),
-                border: OutlineInputBorder(),
-              ),
+            NumbersForm(
+              buttonLabel: 'Location share shuru karo',
+              onSave: (n1, n2) => _start(context, n1, n2),
             ),
-            const SizedBox(height: 20),
-            SizedBox(
-              height: 56,
-              child: FilledButton.icon(
-                onPressed: _busy ? null : _start,
-                icon: _busy
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.share_location),
-                label: const Text('Location share shuru karo',
-                    style: TextStyle(fontSize: 18)),
-              ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 16),
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.red)),
-            ],
             const SizedBox(height: 16),
             const Text(
               'Ek baar shuru karne ke baad aapki location family ke saath '
               'hamesha share hoti rahegi. Notification hamesha dikhega.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// --------------------------------------------------- EDIT NUMBERS SCREEN ----
+
+/// Hamburger menu se: apne number edit/add karo. Purana number bhi
+/// hamesha ke liye kaam karta rahega (upar NUMBERS data model dekho).
+class EditNumbersScreen extends StatelessWidget {
+  const EditNumbersScreen({super.key, required this.current});
+  final List<String> current;
+
+  Future<void> _save(BuildContext context, String n1, String n2) async {
+    final numbers = [n1, if (n2.isNotEmpty) n2];
+    await saveMyNumbers(numbers);
+    final memberId = await getOrCreateMemberId();
+    for (final n in numbers) {
+      await linkNumberToMember(n, memberId);
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Number save ho gaya.')));
+      Navigator.of(context).pop(numbers);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Mera number edit karo')),
+      body: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            NumbersForm(
+              number1Initial: current.isNotEmpty ? current[0] : '',
+              number2Initial: current.length > 1 ? current[1] : '',
+              buttonLabel: 'Save karo',
+              onSave: (n1, n2) => _save(context, n1, n2),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Number badalne ke baad bhi purana number fetch karne par '
+              'kaam karta rahega.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey),
             ),
@@ -408,22 +612,30 @@ class _FindScreenState extends State<FindScreen> {
   String? _error;
   String? _info;
   bool _sharing = true;
+  List<String> _myNumbers = [];
   List<Map<String, dynamic>> _history = [];
 
   @override
   void initState() {
     super.initState();
-    SharedPreferences.getInstance().then((p) {
-      var h = <Map<String, dynamic>>[];
-      try {
-        h = (jsonDecode(p.getString('history') ?? '[]') as List)
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .toList();
-      } catch (_) {}
-      setState(() {
-        _sharing = p.getBool('sharing_on') ?? false;
-        _history = h;
-      });
+    _load();
+  }
+
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    var h = <Map<String, dynamic>>[];
+    try {
+      h = (jsonDecode(p.getString('history') ?? '[]') as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {}
+    final numbers = await loadMyNumbers();
+    if (!mounted) return;
+    setState(() {
+      _phoneCtrl.text = p.getString('last_search') ?? '';
+      _sharing = p.getBool('sharing_on') ?? false;
+      _myNumbers = numbers;
+      _history = h;
     });
   }
 
@@ -454,6 +666,58 @@ class _FindScreenState extends State<FindScreen> {
     setState(() => _history = list);
   }
 
+  /// History me naam/number sudharo (naya number alag entry nahi banata).
+  Future<void> _editHistoryEntry(Map<String, dynamic> entry) async {
+    final nameCtrl = TextEditingController(text: entry['name'] as String);
+    final phoneCtrl = TextEditingController(text: entry['phone'] as String);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('History entry edit karo'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                  labelText: 'Naam', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: phoneCtrl,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                  labelText: 'Mobile number', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final newPhone = normalizePhone(phoneCtrl.text);
+    if (newPhone.length != 10) return;
+    final p = await SharedPreferences.getInstance();
+    final list = _history.where((e) => e['phone'] != entry['phone']).toList();
+    list.removeWhere((e) => e['phone'] == newPhone);
+    list.insert(0, {
+      'phone': newPhone,
+      'name': nameCtrl.text.trim(),
+      't': DateTime.now().millisecondsSinceEpoch,
+    });
+    if (list.length > 20) list.removeRange(20, list.length);
+    await p.setString('history', jsonEncode(list));
+    setState(() => _history = list);
+  }
+
   Future<void> _open() async {
     final phone = normalizePhone(_phoneCtrl.text);
     if (phone.length != 10) {
@@ -469,13 +733,11 @@ class _FindScreenState extends State<FindScreen> {
       _info = null;
     });
     try {
-      final snap =
-          await memberDoc(phone).get().timeout(const Duration(seconds: 15));
-      if (!snap.exists || snap.data()?['lat'] == null) {
+      final d = await resolveMemberData(phone);
+      if (d == null || d['lat'] == null) {
         setState(() => _error = 'Is number ki location abhi nahi mili.');
         return;
       }
-      final d = snap.data()!;
       final lat = (d['lat'] as num).toDouble();
       final lng = (d['lng'] as num).toDouble();
       final updated = (d['updatedAt'] as Timestamp?)?.toDate();
@@ -492,6 +754,8 @@ class _FindScreenState extends State<FindScreen> {
       }
       setState(() => _info = lines.isEmpty ? null : lines.join('\n'));
 
+      final p = await SharedPreferences.getInstance();
+      await p.setString('last_search', phone);
       await _addHistory(phone, _nameCtrl.text.trim());
       final opened = await _openGoogleMaps(lat, lng);
       if (!opened) setState(() => _error = 'Google Maps nahi khul paya.');
@@ -568,6 +832,13 @@ class _FindScreenState extends State<FindScreen> {
     } catch (_) {}
   }
 
+  Future<void> _editMyNumbers() async {
+    final result = await Navigator.of(context).push<List<String>>(
+        MaterialPageRoute(
+            builder: (_) => EditNumbersScreen(current: _myNumbers)));
+    if (result != null && mounted) setState(() => _myNumbers = result);
+  }
+
   Future<void> _toggleSharing(bool on) async {
     final p = await SharedPreferences.getInstance();
     final svc = FlutterBackgroundService();
@@ -575,6 +846,10 @@ class _FindScreenState extends State<FindScreen> {
       svc.invoke('stop');
       await p.setBool('sharing_on', false);
       setState(() => _sharing = false);
+      return;
+    }
+    if (_myNumbers.isEmpty) {
+      setState(() => _error = 'Pehle hamburger menu se apna number daalo.');
       return;
     }
     if (!await Geolocator.isLocationServiceEnabled()) {
@@ -611,7 +886,7 @@ class _FindScreenState extends State<FindScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Family Locator'),
+        title: const Text(kAppName),
         actions: [
           IconButton(
             tooltip: 'SMS fallback numbers',
@@ -619,6 +894,30 @@ class _FindScreenState extends State<FindScreen> {
             onPressed: _editSmsContacts,
           ),
         ],
+      ),
+      drawer: Drawer(
+        child: SafeArea(
+          child: ListView(
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer),
+                child: const Text(kAppName,
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.person),
+                title: const Text('Mera number edit karo'),
+                subtitle:
+                    Text(_myNumbers.isEmpty ? 'Koi number nahi' : _myNumbers.join(', ')),
+                onTap: () {
+                  Navigator.pop(context);
+                  _editMyNumbers();
+                },
+              ),
+            ],
+          ),
+        ),
       ),
       bottomNavigationBar: SafeArea(
         child: SwitchListTile(
@@ -691,12 +990,22 @@ class _FindScreenState extends State<FindScreen> {
                     ? e['name'] as String
                     : e['phone'] as String),
                 subtitle: Text(
-                    '${(e['name'] as String).isNotEmpty ? '${e['phone']} \u2022 ' : ''}'
+                    '${(e['name'] as String).isNotEmpty ? '${e['phone']} • ' : ''}'
                     '${ago(DateTime.fromMillisecondsSinceEpoch(e['t'] as int))}'),
-                trailing: IconButton(
-                  tooltip: 'History se hatao',
-                  icon: const Icon(Icons.close),
-                  onPressed: () => _deleteHistory(e['phone'] as String),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Edit karo',
+                      icon: const Icon(Icons.edit, size: 20),
+                      onPressed: () => _editHistoryEntry(e),
+                    ),
+                    IconButton(
+                      tooltip: 'History se hatao',
+                      icon: const Icon(Icons.close),
+                      onPressed: () => _deleteHistory(e['phone'] as String),
+                    ),
+                  ],
                 ),
                 onTap: () {
                   _nameCtrl.text = e['name'] as String;

@@ -79,6 +79,10 @@ if block:
     s, n = re.subn(r'(\s*)<application', lambda mm: "\n" + block + mm.group(1) + "<application", s, count=1)
     assert n == 1, "could not add permissions to manifest"
 
+# App ka display naam (launcher icon ke niche, aur recents me).
+s, n = re.subn(r'android:label="[^"]*"', 'android:label="Family GPS Tracker"', s, count=1)
+assert n == 1, "could not set app label"
+
 if "flutter_background_service.BackgroundService" not in s:
     svc = """
         <service
